@@ -1,0 +1,8 @@
+{
+  "clusterName": "mlops-poc-dev-msk-serverless",
+  "clusterArn": "arn:aws:kafka:us-east-1:080967118593:cluster/mlops-poc-dev-msk-serverless/ab3f9380-bc19-4eb3-ab67-8d868bf3fa8a-s2",
+  "region": "us-east-1",
+  "topic": "outbox.events.test",
+  "auth": "IAM",
+  "clusterType": "MSK_SERVERLESS"
+}

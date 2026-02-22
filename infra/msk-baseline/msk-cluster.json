@@ -1,0 +1,31 @@
+{
+    "ClusterInfo": {
+        "ClusterType": "SERVERLESS",
+        "ClusterArn": "arn:aws:kafka:us-east-1:080967118593:cluster/mlops-poc-dev-msk-serverless/ab3f9380-bc19-4eb3-ab67-8d868bf3fa8a-s2",
+        "ClusterName": "mlops-poc-dev-msk-serverless",
+        "CreationTime": "2026-02-21T00:43:53.391000+00:00",
+        "CurrentVersion": "K2EUQ1WTGCTBG2",
+        "State": "ACTIVE",
+        "Tags": {},
+        "Serverless": {
+            "VpcConfigs": [
+                {
+                    "SubnetIds": [
+                        "subnet-061de6209161ca6a7",
+                        "subnet-09f6287483edd6c0d"
+                    ],
+                    "SecurityGroupIds": [
+                        "sg-0b2f59012ff85d984"
+                    ]
+                }
+            ],
+            "ClientAuthentication": {
+                "Sasl": {
+                    "Iam": {
+                        "Enabled": true
+                    }
+                }
+            }
+        }
+    }
+}
