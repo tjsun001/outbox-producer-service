@@ -1,0 +1,167 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# ==========================================================
+# MSK SERVERLESS BASELINE CAPTURE SCRIPT (FINAL, STABLE)
+# ==========================================================
+
+AWS_REGION="${AWS_REGION:-us-east-1}"
+CLUSTER_NAME="${CLUSTER_NAME:-mlops-poc-dev-msk-serverless}"
+TOPIC_NAME="${TOPIC_NAME:-outbox.events.test}"
+OUTPUT_DIR="${OUTPUT_DIR:-infra/msk-baseline}"
+
+ATTACH_READONLY_POLICY="${ATTACH_READONLY_POLICY:-true}"
+IAM_USER_NAME="${IAM_USER_NAME:-TSanders}"
+POLICY_NAME="${POLICY_NAME:-MSKReadOnlyBaselineCapture}"
+
+mkdir -p "$OUTPUT_DIR"
+
+echo
+echo "================================================"
+echo "MSK Serverless Baseline Capture Starting"
+echo "================================================"
+echo "AWS_REGION=$AWS_REGION"
+echo "CLUSTER_NAME=$CLUSTER_NAME"
+echo "TOPIC_NAME=$TOPIC_NAME"
+echo "OUTPUT_DIR=$OUTPUT_DIR"
+
+# ----------------------------------------------------------
+# Caller identity
+# ----------------------------------------------------------
+
+echo
+echo "==> Capturing caller identity"
+
+aws sts get-caller-identity \
+  --output json \
+  > "$OUTPUT_DIR/caller-identity.json"
+
+cat "$OUTPUT_DIR/caller-identity.json" | jq .
+
+# ----------------------------------------------------------
+# Resolve cluster ARN
+# ----------------------------------------------------------
+
+echo
+echo "==> Resolving MSK Serverless cluster ARN"
+
+CLUSTER_ARN=$(
+aws kafka list-clusters-v2 \
+  --region "$AWS_REGION" \
+  --query "ClusterInfoList[?ClusterType=='SERVERLESS' && ClusterName=='${CLUSTER_NAME}'].ClusterArn | [0]" \
+  --output text
+)
+
+if [[ "$CLUSTER_ARN" == "None" || -z "$CLUSTER_ARN" ]]; then
+  echo "ERROR: Could not find cluster"
+  exit 1
+fi
+
+echo "$CLUSTER_ARN" > "$OUTPUT_DIR/cluster-arn.txt"
+
+echo "CLUSTER_ARN=$CLUSTER_ARN"
+
+# ----------------------------------------------------------
+# Describe cluster
+# ----------------------------------------------------------
+
+echo
+echo "==> Capturing cluster metadata"
+
+aws kafka describe-cluster-v2 \
+  --region "$AWS_REGION" \
+  --cluster-arn "$CLUSTER_ARN" \
+  --output json \
+  > "$OUTPUT_DIR/msk-cluster.json"
+
+# ----------------------------------------------------------
+# Capture bootstrap brokers
+# ----------------------------------------------------------
+
+echo
+echo "==> Capturing bootstrap brokers"
+
+aws kafka get-bootstrap-brokers \
+  --region "$AWS_REGION" \
+  --cluster-arn "$CLUSTER_ARN" \
+  --output json \
+  > "$OUTPUT_DIR/bootstrap-brokers.json"
+
+# Extract bootstrap safely using jq only
+
+BOOTSTRAP_SERVERS=$(
+jq -r '
+  .BootstrapBrokerStringSaslIam //
+  .BootstrapBrokerStringTls //
+  .BootstrapBrokerStringPublicSaslIam //
+  .BootstrapBrokerStringPublicTls //
+  .BootstrapBrokerString
+' "$OUTPUT_DIR/bootstrap-brokers.json"
+)
+
+if [[ "$BOOTSTRAP_SERVERS" == "null" || -z "$BOOTSTRAP_SERVERS" ]]; then
+  echo "ERROR: Could not extract bootstrap servers"
+  exit 1
+fi
+
+echo "$BOOTSTRAP_SERVERS" > "$OUTPUT_DIR/bootstrap-servers.txt"
+
+echo "BOOTSTRAP_SERVERS=$BOOTSTRAP_SERVERS"
+
+# ----------------------------------------------------------
+# Create topic baseline
+# ----------------------------------------------------------
+
+echo
+echo "==> Writing topic baseline"
+
+cat > "$OUTPUT_DIR/topic-config.json" <<EOF
+{
+  "clusterName": "$CLUSTER_NAME",
+  "clusterArn": "$CLUSTER_ARN",
+  "region": "$AWS_REGION",
+  "topic": "$TOPIC_NAME",
+  "auth": "IAM",
+  "clusterType": "MSK_SERVERLESS"
+}
+EOF
+
+# ----------------------------------------------------------
+# Create ECS env baseline
+# ----------------------------------------------------------
+
+echo
+echo "==> Writing ECS env baseline"
+
+cat > "$OUTPUT_DIR/producer-env-baseline.env" <<EOF
+AWS_REGION=$AWS_REGION
+CLUSTER_NAME=$CLUSTER_NAME
+CLUSTER_ARN=$CLUSTER_ARN
+SPRING_PROFILES_ACTIVE=aws
+SPRING_KAFKA_BOOTSTRAP_SERVERS=$BOOTSTRAP_SERVERS
+APP_TOPIC=$TOPIC_NAME
+EOF
+
+# ----------------------------------------------------------
+# Summary
+# ----------------------------------------------------------
+
+echo
+echo "================================================"
+echo "BASELINE CAPTURE COMPLETE"
+echo "================================================"
+
+ls -lh "$OUTPUT_DIR"
+
+echo
+echo "BOOTSTRAP_SERVERS:"
+echo "$BOOTSTRAP_SERVERS"
+
+echo
+echo "Next:"
+echo "git add $OUTPUT_DIR scripts/msk_baseline_capture.sh"
+echo "git commit -m 'MSK baseline capture'"
+echo "git push"
+
+echo
+echo "DONE"
