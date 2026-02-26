@@ -1,0 +1,229 @@
+name: Producer Smoketest (MSK)
+
+on:
+  workflow_dispatch:
+    inputs:
+      image_tag:
+        description: Optional existing image tag to smoketest (skips build)
+        required: false
+        type: string
+  push:
+    branches: [ main ]
+    paths:
+      - "outbox-producer-service/**"
+      - "ecs/task-definition*.json"
+      - ".github/workflows/producer-smoketest.yml"
+
+permissions:
+  id-token: write
+  contents: read
+
+concurrency:
+  group: outbox-producer-smoketest
+  cancel-in-progress: true
+
+env:
+  AWS_REGION: us-east-1
+
+  # ECR
+  ECR_REPO: outbox-producer-service
+  CONTAINER_NAME: outbox-producer-service
+
+  # ECS
+  ECS_CLUSTER: mlops-poc-dev-ecs-cluster
+  TASK_DEFINITION_FILE: ecs/task-definition.smoketest.json
+
+  # Network (known-good)
+  SUBNET_A: subnet-09f6287483edd6c0d
+  SUBNET_B: subnet-061de6209161ca6a7
+  SECURITY_GROUP: sg-0b2f59012ff85d984
+  ASSIGN_PUBLIC_IP: DISABLED
+
+  # Logs
+  LOG_GROUP: /ecs/outbox-producer-service
+
+jobs:
+  smoketest:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Assert running on main
+        run: |
+          if [ "$GITHUB_REF" != "refs/heads/main" ]; then
+            echo "Must run on main branch"
+            exit 1
+          fi
+
+      - name: Ensure smoketest task definition exists
+        run: |
+          test -f "${{ env.TASK_DEFINITION_FILE }}" || exit 1
+
+      - name: Resolve build mode
+        run: |
+          if [ "${GITHUB_EVENT_NAME}" = "workflow_dispatch" ] && [ -n "${{ inputs.image_tag }}" ]; then
+            echo "SKIP_BUILD=true" >> $GITHUB_ENV
+          else
+            echo "SKIP_BUILD=false" >> $GITHUB_ENV
+          fi
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_TO_ASSUME }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build and push image (amd64)
+        if: env.SKIP_BUILD == 'false'
+        working-directory: outbox-producer-service
+        run: |
+          REGISTRY="${{ steps.login-ecr.outputs.registry }}"
+          IMAGE_TAG="sha-${GITHUB_SHA}"
+          IMAGE_URI="$REGISTRY/${{ env.ECR_REPO }}:$IMAGE_TAG"
+
+          docker buildx version
+          docker buildx build \
+            --platform linux/amd64 \
+            -t "$IMAGE_URI" \
+            --push \
+            .
+
+          echo "IMAGE_URI=$IMAGE_URI" >> $GITHUB_ENV
+          echo "IMAGE_TAG=$IMAGE_TAG" >> $GITHUB_ENV
+
+      - name: Set IMAGE_URI from existing tag
+        if: env.SKIP_BUILD == 'true'
+        run: |
+          REGISTRY="${{ steps.login-ecr.outputs.registry }}"
+          IMAGE_URI="$REGISTRY/${{ env.ECR_REPO }}:${{ inputs.image_tag }}"
+          echo "IMAGE_URI=$IMAGE_URI" >> $GITHUB_ENV
+
+      - name: Resolve image digest (pin)
+        run: |
+          IMAGE_URI="${{ env.IMAGE_URI }}"
+          echo "IMAGE_URI=$IMAGE_URI"
+
+          # Extract registry + repo + tag from IMAGE_URI
+          # format: <registry>/<repo>:<tag>
+          REPO="${{ env.ECR_REPO }}"
+          TAG="${IMAGE_URI##*:}"
+
+          DIGEST="$(aws ecr describe-images \
+            --region "${{ env.AWS_REGION }}" \
+            --repository-name "$REPO" \
+            --image-ids imageTag="$TAG" \
+            --query 'imageDetails[0].imageDigest' \
+            --output text)"
+
+          if [ -z "$DIGEST" ] || [ "$DIGEST" = "None" ]; then
+            echo "ERROR: could not resolve digest for $REPO:$TAG"
+            exit 1
+          fi
+
+          PINNED="${IMAGE_URI%%:*}@$DIGEST"
+          echo "IMAGE_URI_PINNED=$PINNED" >> $GITHUB_ENV
+          echo "IMAGE_URI_PINNED=$PINNED"
+
+      - name: Patch smoketest taskdef image to pinned digest
+        run: |
+          IN="${{ env.TASK_DEFINITION_FILE }}"
+          OUT="/tmp/taskdef.outbox-producer.smoketest.pinned.json"
+          NAME="${{ env.CONTAINER_NAME }}"
+          IMG="${{ env.IMAGE_URI_PINNED }}"
+
+          jq --arg IMG "$IMG" --arg NAME "$NAME" \
+            '(.containerDefinitions[] | select(.name==$NAME) | .image) = $IMG' \
+            "$IN" > "$OUT"
+
+          echo "TASKDEF_PINNED=$OUT" >> $GITHUB_ENV
+
+          # HARD GATE #1: verify pinned image set
+          ACTUAL=$(jq -r --arg NAME "$NAME" '.containerDefinitions[] | select(.name==$NAME) | .image' "$OUT")
+          echo "EXPECTED=$IMG"
+          echo "ACTUAL=$ACTUAL"
+          if [ "$IMG" != "$ACTUAL" ]; then
+            echo "Pinned image mismatch"
+            exit 1
+          fi
+
+      - name: Register smoketest task definition
+        run: |
+          TD_ARN="$(aws ecs register-task-definition \
+            --region "${{ env.AWS_REGION }}" \
+            --cli-input-json "file://${{ env.TASKDEF_PINNED }}" \
+            --query 'taskDefinition.taskDefinitionArn' \
+            --output text)"
+          echo "TD_ARN=$TD_ARN"
+          echo "TD_ARN=$TD_ARN" >> $GITHUB_ENV
+
+      - name: Run smoketest task
+        run: |
+          TASK_ARN="$(aws ecs run-task \
+            --region "${{ env.AWS_REGION }}" \
+            --cluster "${{ env.ECS_CLUSTER }}" \
+            --launch-type FARGATE \
+            --task-definition "${{ env.TD_ARN }}" \
+            --network-configuration "awsvpcConfiguration={subnets=[${{ env.SUBNET_A }},${{ env.SUBNET_B }}],securityGroups=[${{ env.SECURITY_GROUP }}],assignPublicIp=${{ env.ASSIGN_PUBLIC_IP }}}" \
+            --query "tasks[0].taskArn" \
+            --output text)"
+          echo "TASK_ARN=$TASK_ARN"
+          echo "TASK_ARN=$TASK_ARN" >> $GITHUB_ENV
+
+      - name: Wait for task to stop
+        run: |
+          aws ecs wait tasks-stopped \
+            --region "${{ env.AWS_REGION }}" \
+            --cluster "${{ env.ECS_CLUSTER }}" \
+            --tasks "${{ env.TASK_ARN }}"
+
+      - name: HARD GATE #2 - verify exitCode == 0
+        run: |
+          EXIT_CODE="$(aws ecs describe-tasks \
+            --region "${{ env.AWS_REGION }}" \
+            --cluster "${{ env.ECS_CLUSTER }}" \
+            --tasks "${{ env.TASK_ARN }}" \
+            --query "tasks[0].containers[?name=='${{ env.CONTAINER_NAME }}'].exitCode | [0]" \
+            --output text)"
+          echo "EXIT_CODE=$EXIT_CODE"
+          if [ "$EXIT_CODE" != "0" ]; then
+            echo "Smoketest failed (exitCode != 0)"
+            exit 1
+          fi
+
+      - name: HARD GATE #3 - verify success marker in logs
+        run: |
+          TASK_ID="${{ env.TASK_ARN }}"
+          TASK_ID="${TASK_ID##*/}"
+          STREAM="ecs/${{ env.CONTAINER_NAME }}/${TASK_ID}"
+
+          echo "LOG_GROUP=${{ env.LOG_GROUP }}"
+          echo "LOG_STREAM=$STREAM"
+
+          # small retry in case CW stream appears slightly late
+          for i in 1 2 3 4 5 6 7 8 9 10; do
+            if aws logs get-log-events \
+                --region "${{ env.AWS_REGION }}" \
+                --log-group-name "${{ env.LOG_GROUP }}" \
+                --log-stream-name "$STREAM" \
+                --limit 200 \
+                --query "events[].message" \
+                --output text > /tmp/smoketest.log 2>/dev/null; then
+              break
+            fi
+            sleep 2
+          done
+
+          tail -n 120 /tmp/smoketest.log || true
+
+          if ! grep -q "DONE produced=1 exitCode=0" /tmp/smoketest.log; then
+            echo "Success marker not found in logs"
+            exit 1
+          fi
+
+          echo "Smoketest verified successfully"

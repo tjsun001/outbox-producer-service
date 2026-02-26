@@ -1,0 +1,61 @@
+{
+  "containerDefinitions": [
+    {
+      "name": "outbox-producer-service",
+      "image": "080967118593.dkr.ecr.us-east-1.amazonaws.com/outbox-producer-service@sha256:69dae0baa7d23264e7ac07bf392edcf60426a8742cefd16ca6ff9f3d98c418e6",
+      "cpu": 0,
+      "portMappings": [],
+      "essential": true,
+      "entryPoint": [],
+      "command": [],
+      "environment": [
+        {
+          "name": "SPRING_DATASOURCE_USERNAME",
+          "value": "postgres"
+        },
+        {
+          "name": "APP_TOPIC",
+          "value": "outbox.events.test"
+        },
+        {
+          "name": "SPRING_KAFKA_BOOTSTRAP_SERVERS",
+          "value": "boot-zhc6nb6s.c2.kafka-serverless.us-east-1.amazonaws.com:9098"
+        },
+        {
+          "name": "SPRING_DATASOURCE_URL",
+          "value": "jdbc:postgresql://postgres.mlops.internal:5432/jfs"
+        },
+        {
+          "name": "SPRING_DATASOURCE_PASSWORD",
+          "value": "password"
+        },
+        {
+          "name": "SPRING_PROFILES_ACTIVE",
+          "value": "aws"
+        }
+      ],
+      "mountPoints": [],
+      "volumesFrom": [],
+      "logConfiguration": {
+        "logDriver": "awslogs",
+        "options": {
+          "awslogs-group": "/ecs/outbox-producer-service",
+          "awslogs-region": "us-east-1",
+          "awslogs-stream-prefix": "ecs"
+        }
+      },
+      "systemControls": []
+    }
+  ],
+  "family": "outbox-producer-service",
+  "taskRoleArn": "arn:aws:iam::080967118593:role/mlops-poc-dev-ecs-task-role",
+  "executionRoleArn": "arn:aws:iam::080967118593:role/ecsTaskExecutionRole",
+  "networkMode": "awsvpc",
+  "volumes": [],
+  "placementConstraints": [],
+  "requiresCompatibilities": [
+    "FARGATE"
+  ],
+  "cpu": "1024",
+  "memory": "3072"
+}
