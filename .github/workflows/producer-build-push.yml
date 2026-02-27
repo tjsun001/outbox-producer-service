@@ -1,0 +1,93 @@
+name: Producer Build + Push (ECR)
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ main ]
+    paths:
+      - "outbox-producer-service/**"
+      - ".github/workflows/producer-build-push.yml"
+
+permissions:
+  id-token: write
+  contents: read
+
+concurrency:
+  group: outbox-producer-build-push
+  cancel-in-progress: true
+
+env:
+  AWS_REGION: us-east-1
+  ECR_REPO: outbox-producer-service
+
+jobs:
+  build_push:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Assert running on main
+        run: |
+          if [ "$GITHUB_REF" != "refs/heads/main" ]; then
+            echo "Must run on main branch"
+            exit 1
+          fi
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_TO_ASSUME }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build and push image (amd64)
+        working-directory: outbox-producer-service
+        run: |
+          set -euo pipefail
+
+          REGISTRY="${{ steps.login-ecr.outputs.registry }}"
+          IMAGE_TAG="sha-${GITHUB_SHA::12}"
+          IMAGE_URI="$REGISTRY/${{ env.ECR_REPO }}:$IMAGE_TAG"
+
+          echo "Building: $IMAGE_URI"
+
+          docker buildx version
+          docker buildx build \
+            --platform linux/amd64 \
+            -t "$IMAGE_URI" \
+            --push \
+            .
+
+          echo "IMAGE_TAG=$IMAGE_TAG" >> $GITHUB_ENV
+          echo "IMAGE_URI=$IMAGE_URI" >> $GITHUB_ENV
+
+      - name: Resolve image digest (for visibility)
+        run: |
+          set -euo pipefail
+          TAG="${{ env.IMAGE_TAG }}"
+
+          DIGEST="$(aws ecr describe-images \
+            --region "${{ env.AWS_REGION }}" \
+            --repository-name "${{ env.ECR_REPO }}" \
+            --image-ids imageTag="$TAG" \
+            --query 'imageDetails[0].imageDigest' \
+            --output text)"
+
+          if [ -z "$DIGEST" ] || [ "$DIGEST" = "None" ]; then
+            echo "ERROR: could not resolve digest for ${{ env.ECR_REPO }}:$TAG"
+            exit 1
+          fi
+
+          echo "IMAGE_DIGEST=$DIGEST" >> $GITHUB_ENV
+
+      - name: Summary
+        run: |
+          echo "✅ Producer image published"
+          echo "IMAGE_URI=${{ env.IMAGE_URI }}"
+          echo "IMAGE_TAG=${{ env.IMAGE_TAG }}"
+          echo "IMAGE_DIGEST=${{ env.IMAGE_DIGEST }}"
