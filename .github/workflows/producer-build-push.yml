@@ -46,7 +46,6 @@ jobs:
         uses: aws-actions/amazon-ecr-login@v2
 
       - name: Build and push image (amd64)
-        working-directory: outbox-producer-service
         run: |
           set -euo pipefail
 
